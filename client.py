@@ -1,4 +1,4 @@
-import socket, threading, base64
+import socket, threading, base64, os, json, time
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives import hashes
 from cryptography.fernet import Fernet
@@ -6,9 +6,45 @@ from cryptography.fernet import Fernet
 HOST = "127.0.0.1"
 PORT = 55555
 
+configFile = "sessionConfig.json"
+
 client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
 client.connect((HOST, PORT))
+
+def hashFunction(keyword, salt=None):
+    if salt is None:
+        salt = os.urandom(16)
+
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        iterations=600_000
+    )
+
+    hashed = kdf.derive(keyword.encode())
+    return salt, hashed
+
+def saveMasterPass(salt, hashedPass):
+    configData ={
+        "salt": salt.hex(),
+        "hash": hashedPass.hex()
+    }
+
+    with open(configFile, "w") as file:
+        json.dump(configData, file)
+    
+def loadMasterPass():
+    if not os.path.exists(configFile):
+        return None, None
+    with open(configFile, "r") as file:
+        configData = json.load(file)
+
+    salt = bytes.fromhex(configData['salt'])
+    storedHash = bytes.fromhex(configData['hash'])
+
+    return salt, storedHash
 
 def genKeyFromPass(password):
     salt = b'StaticSalt123456'
@@ -27,49 +63,98 @@ def recieveMessages():
         try:
             encryptedMessage = client.recv(1024)
             if encryptedMessage:
-                decryptedMessage = fernetCipher.decrypt(encryptedMessage).decode('utf-8')
-                print(decryptedMessage)
+                try:
+                    decodeCheck = encryptedMessage.decode('utf-8')
+                    if decodeCheck == "YOU_HAVE_BEEN_KICKED":
+                        print("\nYou have been removed from this room by the admin")
+                        client.close()
+                        os._exit(0)
+                    elif decodeCheck.startswith("SERVER_ALERT:"):
+                        print(f"\n {decodeCheck.replace('SERVER_ALERT:', '')}")
+                        continue
+                except UnicodeDecodeError:
+                    pass
+                decryptedMsg = fernetCipher.decrypt(encryptedMessage).decode('utf-8')
+                print(decryptedMsg)
             else:
-                print("DISCONNECTED: Connection to Server LOST!")
+                print("Disconnected: Connection to the server LOST :(")
                 client.close()
                 break
         except:
-            print("ERROR: An error occured while recieving messages. Please enter correct Room Password")
+            print("Cryptographic error maybe - unexpected")
             client.close()
             break
 
+def authentication():
+    print("--- Login ---")
+    salt, storedHash = loadMasterPass()
+
+    if salt is None and storedHash is None:
+        print("Welcome to ChatPy! Set up a secure Master Password.")
+        while True:
+            newPass = input("Create Master Password: ")
+            confirmPass = input("Confirm Master Password: ")
+
+            if newPass == confirmPass:
+                salt, storedHash = hashFunction(newPass)
+                saveMasterPass(salt, storedHash)
+                print("Client Profile Registered!\n")
+                break
+            else:
+                print("Passwords does not match :(")
+    
+    tries = 0
+    while True:
+        if tries >= 3:
+            print("Too Many failed attempts. Wait 30 seconds")
+            time.sleep(30)
+            tries = 0
+        
+        loginPass = input("Enter Master Password to unlock chat: ")
+        _, attempHash = hashFunction(loginPass, salt)
+
+        if attempHash == storedHash:
+            print("--- Login Successful ---")
+            return True
+        else:
+            print("Login Failed. Please try again.")
+            tries += 1
+
 def sendMessages():
-    userName = str(input("Enter your username: "))
-    # roomPass = str(input("Enter the room Password: "))
     print(f"Welcome {userName}! You can now start chatting :)\n")
 
     while True:
         try:
             userInput = input("")
             if userInput.strip():
-                formatedMsg = f"{userName}: {userInput}"
-                encryptedMsg = fernetCipher.encrypt(formatedMsg.encode('utf-8'))
-                client.send(encryptedMsg)
+                if userInput.startswith("/kick:"):
+                    client.send(userInput.encode('utf-8'))
+                else:
+                    formatedMsg = f"{userName}: {userInput}"
+                    encryptedMsg = fernetCipher.encrypt(formatedMsg.encode('utf-8'))
+                    client.send(encryptedMsg)
         except:
             print("ERROR: Failed to send message.")
             client.close()
             break
     
 if __name__ == "__main__":
-    targetRoom = str(input("Enter the Room Name to Create/Join: ")).strip().lower()
 
-    roomPass = str(input("Enter the room Password: "))
-    secretKey = genKeyFromPass(roomPass)
+    if authentication():
+        userName = str(input("Enter your username: ")).strip()
+        targetRoom = str(input("Enter the Room Name to Create/Join: ")).strip().lower()
+        roomPass = str(input("Enter the room Password: "))
+        secretKey = genKeyFromPass(roomPass)
 
-    fernetCipher = Fernet(secretKey)
+        fernetCipher = Fernet(secretKey)
 
-    print("SUCCESS: Secure End-to-End Encrypted Chat Initialized")
+        print("SUCCESS: Secure End-to-End Encrypted Chat Initialized")
 
-    joinPacket = f"JOIN_ROOM:{targetRoom}"
-    client.send(joinPacket.encode('utf-8'))
+        joinPacket = f"JOIN_ROOM:{targetRoom}:{userName}"
+        client.send(joinPacket.encode('utf-8'))
 
-    recieveThread = threading.Thread(target=recieveMessages)
-    recieveThread.daemon = True
-    recieveThread.start()
+        recieveThread = threading.Thread(target=recieveMessages)
+        recieveThread.daemon = True
+        recieveThread.start()
 
-    sendMessages()
+        sendMessages()
