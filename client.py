@@ -1,4 +1,4 @@
-import socket, threading, base64, os, json, time
+import socket, threading, base64, os, json, time, csv
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives import hashes
 from cryptography.fernet import Fernet
@@ -7,10 +7,13 @@ HOST = "127.0.0.1"
 PORT = 55555
 
 configFile = "sessionConfig.json"
+chatHistoryFile = "chatHistory.csv"
 
 client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
 client.connect((HOST, PORT))
+
+localMasterKey = None
 
 def hashFunction(keyword, salt=None):
     if salt is None:
@@ -46,8 +49,8 @@ def loadMasterPass():
 
     return salt, storedHash
 
-def genKeyFromPass(password):
-    salt = b'StaticSalt123456'
+def genKeyFromPass(password, alternateSalt = None):
+    salt = alternateSalt if alternateSalt else b'StaticSalt123456'
     kdf = PBKDF2HMAC(
         algorithm=hashes.SHA256(),
         length=32,
@@ -57,6 +60,18 @@ def genKeyFromPass(password):
 
     derivedKey = kdf.derive(password.encode())
     return base64.urlsafe_b64encode(derivedKey)
+
+def logMessage(plainTextMsg):
+    try:
+        if localMasterKey:
+            localCipher = Fernet(localMasterKey)
+            encryptedLine = localCipher.encrypt(plainTextMsg.encode('utf-8')).decode()
+
+            with open(chatHistoryFile, "a", newline='', encoding='utf-8') as file:
+                writer = csv.writer(file)
+                writer.writerow([time.strftime("%Y-%m-%d %H:%M:%S"), encryptedLine])
+    except Exception as e:
+        print(f"\n Failed to record history data: {e}")
 
 def recieveMessages():
     while True:
@@ -76,6 +91,8 @@ def recieveMessages():
                     pass
                 decryptedMsg = fernetCipher.decrypt(encryptedMessage).decode('utf-8')
                 print(decryptedMsg)
+
+                logMessage(decryptedMsg)
             else:
                 print("Disconnected: Connection to the server LOST :(")
                 client.close()
@@ -86,6 +103,7 @@ def recieveMessages():
             break
 
 def authentication():
+    global localMasterKey
     print("--- Login ---")
     salt, storedHash = loadMasterPass()
 
@@ -115,6 +133,7 @@ def authentication():
 
         if attempHash == storedHash:
             print("--- Login Successful ---")
+            localMasterKey = genKeyFromPass(loginPass, alternateSalt=salt)
             return True
         else:
             print("Login Failed. Please try again.")
@@ -133,6 +152,8 @@ def sendMessages():
                     formatedMsg = f"{userName}: {userInput}"
                     encryptedMsg = fernetCipher.encrypt(formatedMsg.encode('utf-8'))
                     client.send(encryptedMsg)
+
+                    logMessage(formatedMsg)
         except:
             print("ERROR: Failed to send message.")
             client.close()

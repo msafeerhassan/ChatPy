@@ -49,7 +49,7 @@ def handleClient(client, roomName):
                                 broadCastMessage(alertPacket.encode('utf-8'), client, roomName)
                         else:
                             client.send("SERVER_ALERT: Access Denied! You are not the room Admin")
-                    continue
+                        continue
                 except UnicodeDecodeError:
                     pass
                 
@@ -98,6 +98,7 @@ def recieveConnections():
                 parts = initMsg.split(":")
                 roomName = parts[1].strip().lower()
                 userName = parts[2].strip()
+                clientUsernames[clientSocket] = userName
 
                 if roomName not in rooms:
                     rooms[roomName] = {
